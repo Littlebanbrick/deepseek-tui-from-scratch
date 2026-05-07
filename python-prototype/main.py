@@ -2,7 +2,9 @@ from config import get_config
 from chat import ChatBot
 
 def main():
-    print("DeepSeek llm. (Enter 'quit' to quit)")
+    print("DeepSeek llm.")
+    print("Enter 'quit' to quit.")
+    print("Enter '/thinking' to enable thinking display.")
     print("-" * 40)
     
     try:
@@ -16,10 +18,14 @@ def main():
     while True:
         try:
             user_input = input("\nYou: ")
-            if user_input.lower() in ["quit", "exit", "q"]:
+            if user_input.lower() in ["quit"]:
                 print("Bye!")
                 break
             if not user_input.strip():
+                continue
+            if user_input.lower() == "/thinking":
+                state = bot.toggle_thinking()
+                print(f"Thinking: {state}")
                 continue
                 
             bot.send_message(user_input)

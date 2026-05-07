@@ -13,4 +13,5 @@ def get_config():
         "api_key": api_key,
         "base_url": os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
         "model": os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+        "show_thinking": os.getenv("SHOW_THINKING", "false").lower() in ("true", "1", "yes"),
     }
