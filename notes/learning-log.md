@@ -214,3 +214,209 @@ if len(messages) > MAX_MESSAGES:
     recent = messages[-(MAX_MESSAGES - SYSTEM_COUNT):]
     messages = preserved + recent
 ```
+
+# 2026.5.9
+
+## Part 1: 流式输出
+
+**原理：**
+
+普通非流式请求：客户端发送整个请求 → 服务器生成完整回复 → 一次返回全部 JSON。用户必须等模型生成完所有文字才能看到响应。
+
+而流式请求：
+- 客户端在请求中加入 `"stream": true`。
+- 服务器不会一次性返回完整结果，而是持续推送多个 HTTP 响应块（chunk）。
+- 每个 chunk 是标准 **SSE（Server-Sent Events）** 格式，通常长这样：
+  
+  ```
+  data: {"choices":[{"delta":{"content":"你"}}]}
+
+  data: {"choices":[{"delta":{"content":"好"}}]}
+
+  data: {"choices":[{"delta":{"content":"！"}}]}
+
+  data: [DONE]
+  ```
+
+- 客户端一边收chunk一边打印，就能实现逐字输出。
+
+DeepSeek API 完全兼容这种流式协议。
+
+**实现方法：**
+
+只需修改两处：
+1. 请求体中加 `"stream": True`。类似这样：
+   
+   ```python
+       resp = requests.post(
+        "https://api.deepseek.com/chat/completions",
+        headers={
+            "Authorization": f"Bearer {API_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "model": "deepseek-chat",
+            "messages": messages,
+            "stream": True                # 开启流式
+        },
+        stream=True                       # 让 requests 不立即下载全部 body
+    )
+    ```
+
+2. 将 `resp.json()` 改为遍历 `resp.iter_lines()` 解析 SSE 消息。
+   ```python
+    # 处理 SSE 流
+    partial_content = ""
+    print("Assistant: ", end="", flush=True)
+    for line in resp.iter_lines(decode_unicode=True):
+        if not line:
+            continue
+        if line.startswith("data: "):   # SSE 协议中每个事件通常以 data: 开头
+            data_str = line[6:]           # 去掉 "data: " 前缀
+            if data_str == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data_str)
+                delta = chunk["choices"][0].get("delta", {})
+                content = delta.get("content", "")
+                if content:
+                    print(content, end="", flush=True)  # 逐字打印，不换行，立即输出
+                    partial_content += content
+            except json.JSONDecodeError:
+                pass
+
+    print()   # 换行
+
+    # 最后，将完整回复追加到历史
+    messages.append({"role": "assistant", "content": partial_content})
+    ```
+
+同时为了让 token 输出更平滑，可以在请求体的 JSON 字典中设置 `stream_options={"include_usage": False}`，以避免 DeepSeek 在流式响应的最后单独返回一个包含 token 用量但是 `delta` 为空的数据块，这样你的流式解析代码就只用处理 `delta.content`，不会被最后的空块干扰。
+
+## Part 2: TRY & EXCEPT
+
+在实际运行中，网络波动、服务端异常、用户中断等都会导致程序崩溃。添加 `try-except` 可以让程序更健壮，提供友好的错误提示，并在退出前安全保存会话。
+
+**需要捕获的主要异常：**
+
+| 异常类型 | 场景 | 处理方式 |
+|---------|------|----------|
+| `KeyboardInterrupt` | 用户按 `Ctrl+C` 中断 | 保存会话后优雅退出 |
+| `requests.exceptions.RequestException` | 网络超时、DNS 失败、连接重置等 | 提示用户，跳过本轮，不丢失历史 |
+| `json.JSONDecodeError` | 服务端返回非 JSON（比如网关错误） | 提示服务异常，保留用户输入 |
+| `redis.exceptions.RedisError` | Redis 连接断开或写入失败 | 提示但继续对话，下次可能丢失持久化 |
+| 其他通用 `Exception` | 未知错误 | 防止整个程序崩溃，保存退出 |
+
+## Part 3: 深度思考
+
+不难看出，目前的`chat.py`中还不支持深度思考模式。我们现在希望程序不仅可以开启深度思考，也可以让用户选择是否显示思考内容。以下以`deepseek-v4`为例说明如何做到这一点。
+
+**实现方式：**
+- 维护两个布尔变量：`thinking_enabled`（是否请求深度思考）、`show_reasoning`（是否将思考过程打印出来）。
+- 在对话循环的 `input` 中，若用户输入的是本地命令（以 `:` 开头），则切换对应开关并打印状态，然后 `continue` 重新等待输入。
+- 命令设计：
+  - `:think` → 切换深度思考模式
+  - `:show` → 切换是否显示思考内容
+  - `:exit` 依旧退出
+- 提示符中显示当前模式，如 `[t:ON s:ON] You: `。
+
+**代码整合（在流式请求部分）**：
+
+```python
+# ---------- 新增：思考模式开关 ----------
+thinking_enabled = True   # 默认开启深度思考
+show_reasoning = True     # 默认显示思考内容
+
+while True:
+    # 生成带状态提示符
+    status = f"t:{'ON' if thinking_enabled else 'OFF'} s:{'ON' if show_reasoning else 'OFF'}"
+    try:
+        user_input = input(f"[{session_id[:8]}...]({status}) You: ")
+    except (EOFError, KeyboardInterrupt):
+        ...
+
+    # 处理本地命令
+    if user_input.startswith(":"):
+        cmd = user_input[1:].strip().lower()
+        if cmd == "think":
+            thinking_enabled = not thinking_enabled
+            print(f"Deep thinking {'enabled' if thinking_enabled else 'disabled'}.")
+        elif cmd == "show":
+            show_reasoning = not show_reasoning
+            print(f"Reasoning display {'ON' if show_reasoning else 'OFF'}.")
+        elif cmd == "exit":
+            break
+        else:
+            print("Unknown command. Available: :think, :show, :exit")
+        continue
+
+    # 正常对话框 ...
+```
+
+在构造 API 请求时，根据 `thinking_enabled` 动态组装参数：
+
+```python
+json_data = {
+    "model": "deepseek-v4-flash",
+    "messages": messages,
+    "stream": True,
+    "stream_options": {"include_usage": False}
+}
+if thinking_enabled:
+    json_data["thinking"] = {"type": "enabled"}
+    # 还可固定 reasoning_effort 为 "high" 或让用户通过命令调整
+```
+
+在流式解析中，根据 `show_reasoning` 决定是否打印思考内容：
+
+```python
+# 处理思考内容
+reasoning_chunk = delta.get("reasoning_content", "")
+if reasoning_chunk and show_reasoning:
+    print(reasoning_chunk, end="", flush=True)
+partial_reasoning += reasoning_chunk
+
+# 处理回答内容（必须打印）
+content_chunk = delta.get("content", "")
+if content_chunk:
+    if partial_reasoning and not partial_content and show_reasoning:
+        print("\n--- Answer ---", flush=True)
+    print(content_chunk, end="", flush=True)
+    partial_content += content_chunk
+```
+
+**关于为什么不使用快捷键 Ctrl+T 进行模式切换：**
+
+在标准终端中，`Ctrl+T` 通常被保留（如 Unix 信号的 `SIGINFO`），程序级的 `input()` 无法可靠捕获。使用 `pynput` 等库会引入重依赖。另外，在纯命令行 `input()` 中捕获全局组合键本身很复杂（需要监听线程或平台特定库）。上述命令方式能达到相同目的，且跨平台、无额外依赖。
+
+## Part 4: 单独的配置加载文件
+
+在项目的演化中，我们将所有可调整的配置（API 密钥、模型名称、Redis 连接信息、消息条数限制、过期时间等）从 `chat.py` 中抽离到单独的 `config.py` 文件中。打开 `config.py` 即可看到当前使用的模型、超时时间等所有关键参数，无需在主逻辑代码中翻找。当需要临时切换模型或修改缓存过期时间时，直接更改一两个变量即可，不易出错。
+
+**代码示例：**
+
+```python
+# DeepSeek Chat - Configuration
+# Modify values here; do NOT hardcode them in chat.py
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# --- API ---
+API_KEY = os.getenv("DEEPSEEK_API_KEY")
+DEFAULT_MODEL = "deepseek-v4-flash"
+
+# --- Redis ---
+REDIS_HOST = "localhost"
+REDIS_PORT = 6379
+SESSION_PREFIX = "session:"
+EXPIRE_SECONDS = 1800           # 30 minutes
+
+# --- Messages ---
+MAX_MESSAGES = 40               # how many recent messages to keep
+REASONING_EFFORT = "high"       # "high" or "max"
+```
+
+同时，在`chat.py`中作相应修改即可。

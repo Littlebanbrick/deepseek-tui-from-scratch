@@ -11,7 +11,7 @@ Instead of only reading source code, this project learns by **building the same 
 The process follows a **"functional accumulation layers"** approach:
 
 - [x] **Layer 0** – Minimal chat loop with streaming ([`python-prototype`](python-prototype/))
-- [ ] **Layer 1** – Streaming parser with reasoning / content separation
+- [x] **Layer 1** – Streaming parser with reasoning / content separation
 - [ ] **Layer 2** – Conversation persistence & multi‑turn memory
 - [ ] **Layer 3** – Simple TUI interface (prompt_toolkit / ratatui)
 - [ ] **Layer 4** – Tool system (file ops, shell commands)
