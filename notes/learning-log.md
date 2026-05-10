@@ -420,3 +420,294 @@ REASONING_EFFORT = "high"       # "high" or "max"
 ```
 
 同时，在`chat.py`中作相应修改即可。
+
+# 2026.5.10
+
+## Part 1: UI改进
+
+昨天功能是实现了，但是UI也太丑了，大概长成下面这个样子：
+
+```
+[7c64ea0d...](t:ON s:ON m:FLASH) You: wow
+Assistant: [Thinking] 好的，用户只发了一个“wow”，这很可能是一个表达惊讶、赞叹或者兴奋的情绪词。问题非常简单直接，深层需求可能就是希望得到一些呼应或者有趣的互动，而不是一个具体的信息查询。
+
+我需要对这个简短的感叹做出一个热情、有趣且多选择的回应，让用户感觉被理解，同时提供几个方向供用户选择，引导对话继续下去。“wow”这个词可以对应很多场景，比如看到神奇的东西、听到好消息、或者只是纯粹的惊叹。我可以列举几种常见的可能性，并邀请用户分享具体内容。
+
+想到了几种回应方向：可以用感叹词共鸣，可以假设是看到酷东西或好消息，也可以玩个“wow”的小游戏。最后用一个开放性问题收尾，鼓励用户展开话题。这样既回应了情绪，又为对话留出了空间。
+[Answer] 哈哈，这个“wow”来得有点突然又充满情绪！我感受到了你的惊叹、好奇或者兴奋。🤩
+
+不过，猜谜游戏开始——这个“wow”是对什么的反应呢？是：
+- **看到了什么酷玩意？**（比如：一段神奇的视频、一张无敌的照片、一个新发明）
+- **生活里的好消息？**（中了彩票？收到惊喜礼物？）
+- **还是被我刚才说的话震撼到了？**（如果是这样，那我可得骄傲一下 😎）
+
+不管怎样，既然你“wow”了，那我必须给力点：
+- 如果你刚看到什么**超赞的内容**，告诉我，我陪你一起分析它为什么这么炸。
+- 如果你想听个**冷知识**，我立马奉上“日本地铁里的乌鸦会偷偷把乘客的眼镜叼走”这种级别的。
+- 又或者，你想玩个**“wow接力”**？你wow一句，我回一个更wow的。
+
+来吧，丢个细节过来，让我们一起把惊叹值拉满！🚀
+```
+
+我们希望：
+
+1. 全屏应用。即在程序开始时清屏，程序结束时回复原来的界面。
+2. 会话ID、thinking_mode、show_thinking、model这些参数不要出现在输入区的前面（不然也太长了），可以出现在固定在UI顶部的某个“状态栏”内。
+3. 输入区不要随内容块移动，可以固定在UI底部。
+4. 实现类似于网页端的对话框效果，prompt用蓝色框包裹，answer则用白色框。同时通过换行和颜色区分thinking和answer的内容。
+
+我们将基于 Python 标准库 `curses` 来实现。
+
+### 1. 全屏应用：启动清屏，退出恢复
+
+- 使用 `curses.wrapper()` 启动程序，它会自动初始化全屏、隐藏光标、清屏，并在退出时还原终端。
+- 在 `wrapper` 内部再创建各个子窗口。
+
+```python
+import curses
+
+def main(stdscr):
+    curses.curs_set(0)          # 隐藏光标
+    stdscr.clear()
+    # ... 初始化颜色、布局 ...
+    # 主循环
+
+if __name__ == "__main__":
+    curses.wrapper(main)
+```
+
+- 退出时一切由 `wrapper` 自动还原，无需手动操作。
+
+### 2. 顶部状态栏
+
+- 用 `stdscr.subwin()` 在屏幕最上方划出一个 1 行高的窗口，专门显示状态信息。
+- 状态内容可设计为：`Session: xxxxxxxx | Model: V4-FLASH | Think: ON/OFF | Show: ON/OFF`
+- 每次状态变化时，只需刷新该窗口，不影响其他区域。
+
+```python
+height, width = stdscr.getmaxyx()
+status_win = stdscr.subwin(1, width, 0, 0)   # 第 0 行
+status_win.addstr(0, 0, f"Session: {short_id}  Model: {model_short}  Think: {t}  Show: {s}")
+status_win.refresh()
+```
+
+其中：
+
+1. `stdscr` 是 `curses` 的主窗口对象（standard screen），代表整个终端屏幕。`curses.wrapper()` 会创建它并传入我们的 `main` 函数。
+2. `.getmaxyx()`：以一个元组 `(y, x)` 的形式返回当前主窗口的行数和列数（高度和宽度），通常习惯写成 `height, width`。
+3. `.subwin(nlines, ncols, begin_y, begin_x)`：在主窗口（`stdscr`）内部创建一个子窗口（子窗口是一个独立的绘制区域，有自己的坐标系，但受主窗口管辖）。
+   这里传入的四个参数说明子窗口高度为1行，宽度为整个屏幕的宽度，起始行在第0行（最顶部），起始列在第0列（最左边）。
+4. `.addstr(y, x, str)`：在子窗口的指定位置写入字符串。
+5. `.refresh()`：将子窗口缓冲区的内容实际绘制到屏幕上。`只有调用 refresh()` 后，之前用 `addstr()` 添加的文字才会被用户看到。
+   `curses` 采用“双缓冲”机制：所有绘制操作先写入虚拟屏幕，需要显式调用 `refresh()` 才会更新物理终端，这样可以避免闪烁。
+
+当然，也许有人（比如我）更喜欢“session字段左对齐，其余右对齐，但仍然在同一行内”这种布局，我们可以使用 `status_win.addstr(0, 0, left_text)` 写左侧，再用 `status_win.addstr(0, width - len(right_text), right_text)` 写右侧：
+
+```python
+left = f"Session: {short_id}"
+right = f"Model: {model_short}  Think: {t}  Show: {s}"
+status_win.addstr(0, 0, left)
+status_win.addstr(0, width - len(right), right)
+status_win.refresh()
+```
+
+`width` 从 `getmaxyx()` 获取，`right` 靠右对齐到终端右边缘。
+
+### 3. 底部输入区
+
+- 在屏幕底部划出一个 1 行（或者多行）的窗口用于用户输入。
+- 使用 `curses.echo()` / `noecho()` 控制回显，结合 `getstr()` 或逐字符读取来实现输入。
+- 输入过程中，输入区固定在底部不动。
+
+```python
+input_win = stdscr.subwin(1, width, height-1, 0)    # 单行输入区
+input_win.addstr(0, 0, "")  # 在第 0 行第 0 列写入提示 ""，保留这个函数是为了方便扩展
+input_win.refresh()
+user_input = input_win.getstr(0, 0, 100).decode('utf-8')
+```
+
+其中：`user_input = input_win.getstr(0, 0, 100).decode('utf-8')` 指从子窗口的第 0 行第 0 列开始，读取最多 100 个字符的输入，返回 bytes 后解码。
+
+如果我们想要去除这个字符上限，需要使用 `curses.textpad.Textbox` 替代 `getstr`。`Textbox` 的 `edit()` 方法没有固定长度限制，它会持续接受输入直到用户按下 `Ctrl+G` 提交，并且能够自动换行、滚动并支持 Backspace/Delete/方向键。这给我们构造多行输入区提供了启示：
+
+```py
+import curses
+import curses.textpad
+
+def get_multiline_input(stdscr, height, width):
+    # 在屏幕底部创建 5 行高的输入区域
+    input_win = stdscr.subwin(5, width, height - 5, 0)
+    # 第一行固定为提示符 ""
+    input_win.addstr(0, 0, "")
+    input_win.refresh()
+
+    # 从 input_win 内部再切出一个 4 行高的编辑窗口（第二行开始）
+    edit_win = input_win.derwin(4, width - 1, 1, 0)
+    edit_win.keypad(True)          # 允许方向键等特殊按键
+
+    # 创建文本框控件并启动编辑模式
+    textbox = curses.textpad.Textbox(edit_win)
+    curses.curs_set(1)             # 显示光标
+    user_text = textbox.edit()     # 进入编辑循环，Ctrl+G 提交
+    curses.curs_set(0)             # 隐藏光标
+
+    # 清空输入区域并返回用户输入的内容
+    input_win.clear()
+    input_win.refresh()
+    return user_text.strip()
+```
+
+好吧，Ctrl+G 提交未免有点非主流。如果真的想要像现代的主流设计一样 Enter 提交 / Shift+Enter 换行，还是得自己写一个逐字符读取循环，而非使用 `Textbox`。
+以下是一个精简的可行实现：
+
+```python
+import curses
+
+def get_multiline_input(stdscr, height, width):
+    input_win = stdscr.subwin(5, width, height - 5, 0)
+    input_win.addstr(0, 0, "You: ")
+    input_win.refresh()
+
+    edit_win = input_win.derwin(4, width - 1, 1, 0)
+    edit_win.keypad(True)
+    curses.curs_set(1)
+
+    lines = [""]                # 多行数据，每项为一行字符串
+    cursor_y, cursor_x = 0, 0   # 光标在当前行中的位置
+
+    def redraw():
+        edit_win.clear()
+        for i, line in enumerate(lines):
+            edit_win.addstr(i, 0, line[:edit_win.getmaxyx()[1]-1])
+        edit_win.move(cursor_y, cursor_x)
+        edit_win.refresh()
+
+    while True:
+        redraw()
+        ch = edit_win.get_wch()  # 返回单字符或 int (KEY_*)
+
+        if ch == '\n':           # 普通 Enter → 提交
+            break
+
+        # 检测 Shift+Enter 的转义序列 \x1b[13;2u
+        if isinstance(ch, str) and ch.startswith('\x1b'):
+            # 尝试读取剩余部分
+            try:
+                rest = edit_win.getkey()  # 获取完整转义序列
+                if rest == '[13;2u' or ch + rest == '\x1b[13;2u':
+                    # 换行
+                    lines.insert(cursor_y + 1, lines[cursor_y][cursor_x:])
+                    lines[cursor_y] = lines[cursor_y][:cursor_x]
+                    cursor_y += 1
+                    cursor_x = 0
+                    continue
+            except:
+                pass
+
+        if isinstance(ch, str) and len(ch) == 1:
+            # 普通字符插入
+            line = lines[cursor_y]
+            lines[cursor_y] = line[:cursor_x] + ch + line[cursor_x:]
+            cursor_x += 1
+        elif ch == curses.KEY_BACKSPACE or ch == 127:
+            if cursor_x > 0:
+                line = lines[cursor_y]
+                lines[cursor_y] = line[:cursor_x-1] + line[cursor_x:]
+                cursor_x -= 1
+            elif cursor_y > 0:
+                # 退格到上一行末尾
+                prev_len = len(lines[cursor_y-1])
+                lines[cursor_y-1] += lines.pop(cursor_y)
+                cursor_y -= 1
+                cursor_x = prev_len
+        elif ch == curses.KEY_DC:
+            line = lines[cursor_y]
+            if cursor_x < len(line):
+                lines[cursor_y] = line[:cursor_x] + line[cursor_x+1:]
+            elif cursor_y < len(lines) - 1:
+                # 连接下一行
+                lines[cursor_y] += lines.pop(cursor_y+1)
+        elif ch == curses.KEY_LEFT:
+            if cursor_x > 0:
+                cursor_x -= 1
+            elif cursor_y > 0:
+                cursor_y -= 1
+                cursor_x = len(lines[cursor_y])
+        elif ch == curses.KEY_RIGHT:
+            if cursor_x < len(lines[cursor_y]):
+                cursor_x += 1
+            elif cursor_y < len(lines) - 1:
+                cursor_y += 1
+                cursor_x = 0
+        elif ch == curses.KEY_UP:
+            if cursor_y > 0:
+                cursor_y -= 1
+                cursor_x = min(cursor_x, len(lines[cursor_y]))
+        elif ch == curses.KEY_DOWN:
+            if cursor_y < len(lines) - 1:
+                cursor_y += 1
+                cursor_x = min(cursor_x, len(lines[cursor_y]))
+
+    curses.curs_set(0)
+    input_win.clear()
+    input_win.refresh()
+    return '\n'.join(lines).strip()
+```
+
+其中：
+
+1. 用 `edit_win.get_wch()` 捕获按键，普通 `Enter` 发送 `'\n'`，我们设定其为提交，结束循环。
+2. `Shift+Enter` 在多数现代终端发出 `'\x1b[13;2u'`（CSI 序列），代码通过检测 `'\x1b'` 开头、继续读取后续序列来识别。若是，则在当前光标处换行拆分行。
+3.  Backspace、Delete、方向键、上下键的处理逻辑与常见编辑器一致。
+4.  多行文本存储在 `lines` 列表中，绘制时只显示窗口能容纳的行数（最多 4 行），超出部分会被隐藏，但可以通过上下键滚动查看。
+
+为了保持高层主程序 `chat.py` 的简洁，我们将以上输入逻辑抽取为单独文件（如 `input_handler.py`）更易于维护，使用时只需 `from input_handler import get_multiline_input`即可。
+
+### 4. 对话气泡效果（滚动消息区）
+
+**核心思路：**中间区域（除去状态栏和输入区）用于显示对话历史。每条消息绘制为一个“气泡”：prompt用黑底蓝字，answer用黑底白字，thinking用黑底灰字。我们通过 `curses.init_pair()` 定义颜色对，然后 `addstr()` 时使用相应属性。
+
+颜色定义示例：
+
+```python
+curses.start_color()    # 启用终端的颜色功能
+curses.init_pair(1, curses.COLOR_BLUE, curses.COLOR_BLACK)   # prompt
+curses.init_pair(2, curses.COLOR_WHITE, curses.COLOR_BLACK)  # answer
+curses.init_pair(3, curses.COLOR_GREY, curses.COLOR_BLACK)  # thinking
+```
+
+其中 `curses.init_pair(pair_number, fg, bg)` 的作用是定义一个颜色对，`fg`为前景色（即字色），`bg`为背景色。
+
+同样，我们将UI逻辑抽取为单独的 `ui.py` 文件。
+
+## Part 2: 项目模块化拆分
+
+我们刚才进行了两次把某个逻辑拆分出来、放到单独文件中的操作。现在不妨做得更彻底一些。
+
+| 文件 | 职责 |
+|------|------|
+| `config.py` | 所有可调参数（密钥、模型名、超时等），一目了然 |
+| `api_client.py` | 封装 DeepSeek API 通信，处理流式解析 |
+| `ui.py` | 负责 curses 界面布局、颜色、绘制与刷新 |
+| `input_handler.py` | 多行文本输入，支持方向键和滚动 |
+| `session.py` | 会话持久化，管理消息列表的存取与截断 |
+| `commands.py` | 将本地命令（`:exit`、`:think` 等）解析为结构化动作 |
+| `main.py` | 主流程控制，串联以上模块，几乎只有业务逻辑 |
+
+拆分后，每一部分的修改都不影响其他部分，新增命令或更换存储后端也只需改动对应文件。程序的总体结构变得清晰、易于维护和扩展。这种模块化思想是软件开发中的常见实践——单一职责原则，让代码可读性变强。
+
+## 附录
+
+经过我的实践， `curses` 简直就是一坨。 `windows-curses` 在绘制中文宽字符时内部光标只推进 1 列，汉字相互覆盖，不得不逐字手动定位坐标，代码复杂且脆弱（其实到最后都没有解决这个bug）。还有就是要手动解析Esc、Shift+Enter 等等的 CSI 序列，逻辑乱的要死。终端兼容性也是垃圾。今天在这个东西上花了五个小时还是解决不了问题，我决定换用Prompt Toolkit 和 rich 重写UI。
+
+DeepSeek说：
+
+```
+**Prompt Toolkit 是一个更现代、跨平台的终端 UI 框架：**  
+- 原生支持 Unicode 和宽字符，无需手动计算列宽。  
+- 内置多行输入控件，完美处理 Enter 提交、Shift+Enter 换行、方向键及鼠标滚动。  
+- 提供布局系统，可轻松实现固定状态栏、消息区和输入区。  
+- 完全避免 curses 的底层陷阱，大幅减少代码量，提升可维护性。  
+```
+
+妈的，不写了，明天再说。
